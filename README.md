@@ -103,10 +103,6 @@ RouteVulScan是使用java语言基于burpsuite api开发的可以递归检测脆
 * 2026-07-10 优化UI自适应、Host白名单和扫描调度稳定性【✓】
 * 2026-07-10 删除不必要的功能【✓】
 
-## 开心值
-
-[![Stargazers over time](./img/star-history.svg)](https://github.com/F6JO/RouteVulScan/stargazers)
-
 ## 最后
 
 ***
