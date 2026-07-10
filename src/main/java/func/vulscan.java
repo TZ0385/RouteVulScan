@@ -5,13 +5,8 @@ import burp.*;
 import utils.BurpAnalyzedRequest;
 import yaml.YamlUtil;
 
-import java.net.URL;
 import java.util.*;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.concurrent.Future;
 
 public class vulscan {
 
@@ -38,12 +33,11 @@ public class vulscan {
 //        httpService = help.buildHttpService(iRequestInfo.getUrl().getHost(), iRequestInfo.getUrl().getPort(), iRequestInfo.getUrl().getProtocol());
         httpService = this.Root_Request.requestResponse().getHttpService();
         IRequestInfo analyze_Request = help.analyzeRequest(httpService, request);
-        List<String> heads = analyze_Request.getHeaders();
-        burp.ThreadPool = Executors.newFixedThreadPool((Integer) burp.Config_l.spinner1.getValue());
+        List<String> heads = new ArrayList<String>(analyze_Request.getHeaders());
 
 
         // 判断请求方法为POST
-        if (this.help.analyzeRequest(request).getMethod() == "POST")
+        if ("POST".equals(this.help.analyzeRequest(request).getMethod()))
             //将POST切换为GET请求
             request = this.help.toggleRequestMethod(request);
         // 获取所有参数
@@ -60,34 +54,31 @@ public class vulscan {
         IHttpRequestResponse newHttpRequestResponse = Root_Request.requestResponse();
         // 使用/分割路径
         IRequestInfo analyzeRequest = this.help.analyzeRequest(newHttpRequestResponse);
-        List<String> headers = analyzeRequest.getHeaders();
-        HashMap<String, String> headMap = vulscan.AnalysisHeaders(headers);
-        String[] domainNames = vulscan.AnalysisHost(headMap.get("Host"));
-
-
         String[] paths = analyzeRequest.getUrl().getPath().split("\\?",2)[0].split("/");
 
         Map<String, Object> Yaml_Map = YamlUtil.readYaml(burp.Config_l.yaml_path);
-        List<Map<String, Object>> Listx = (List<Map<String, Object>>) Yaml_Map.get("Load_List");
+        Object loadList = Yaml_Map.get("Load_List");
+        if (!(loadList instanceof List)) {
+            this.burp.call.printError("RouteVulScan rule list is invalid.");
+            return;
+        }
+        List<?> Listx = (List<?>) loadList;
+        if (Listx == null || Listx.isEmpty()) {
+            this.burp.call.printError("RouteVulScan rule list is empty.");
+            return;
+        }
         if (paths.length == 0) {
             paths = new String[]{""};
         }
-        List<String> Bypass_List = (List<String>) Yaml_Map.get("Bypass_List");
-        if (burp.DomainScan) {
-            LaunchPath(true, domainNames, Listx, newHttpRequestResponse, heads, Bypass_List);
-        }
-        LaunchPath(false,paths,Listx,newHttpRequestResponse,heads,Bypass_List);
+        LaunchPath(paths,Listx,newHttpRequestResponse,heads);
 
 
 
     }
 
-    private void LaunchPath(Boolean ClearPath_record ,String[] paths,List<Map<String, Object>> Listx,IHttpRequestResponse newHttpRequestResponse,List<String> heads,List<String> Bypass_List){
+    private void LaunchPath(String[] paths,List<?> Listx,IHttpRequestResponse newHttpRequestResponse,List<String> heads){
         this.Path_record = "";
         for (String path : paths) {
-            if (ClearPath_record){
-                this.Path_record = "";
-            }
             if (path.contains(".") && path.equals(paths[paths.length - 1])) {
                 break;
             }
@@ -101,39 +92,46 @@ public class vulscan {
 
             boolean is_InList;
             synchronized (this.burp.history_url) {
-                is_InList = !this.burp.history_url.contains(url);
+                is_InList = this.burp.history_url.add(url);
             }
 
-
             if (is_InList) {
-                synchronized (this.burp.history_url) {
-                    this.burp.history_url.add(url);
-                }
-                for (Map<String, Object> zidian : Listx) {
-                    this.burp.ThreadPool.execute(new threads(zidian, this, newHttpRequestResponse, heads, Bypass_List));
+                List<Future<?>> futures = new ArrayList<Future<?>>();
+                String pathRecord = this.Path_record;
+                for (Object ruleObject : Listx) {
+                    if (!(ruleObject instanceof Map)) {
+                        continue;
+                    }
+                    Map<String, Object> zidian = (Map<String, Object>) ruleObject;
+                    if (zidian == null || !Boolean.parseBoolean(String.valueOf(zidian.get("loaded")))) {
+                        continue;
+                    }
+                    futures.add(this.burp.submitScanTask(new threads(zidian, this, newHttpRequestResponse, heads, pathRecord)));
                 }
 
 
-                int whileSiz = 0;
-                while (true) {
-//                    this.burp.call.printError(String.valueOf(whileSiz));
-                    if (whileSiz >= 10){
-                        this.burp.ThreadPool.shutdownNow();
-                        this.burp.ThreadPool = Executors.newFixedThreadPool((Integer) this.burp.Config_l.spinner1.getValue());
-                        this.burp.call.printError("Timeout: " + url + "/*");
+                long deadline = System.currentTimeMillis() + 31000L;
+                boolean timeout = false;
+                while (!allDone(futures)) {
+                    if (System.currentTimeMillis() >= deadline) {
+                        timeout = true;
+                        for (Future<?> future : futures) {
+                            if (!future.isDone()) {
+                                future.cancel(true);
+                            }
+                        }
                         break;
                     }
-                    // 防止线程混乱，睡眠3.1秒
                     try {
-                        Thread.sleep(3100);
+                        Thread.sleep(200);
                     } catch (InterruptedException e) {
-                        e.printStackTrace();
-                    }
-                    if (((ThreadPoolExecutor) this.burp.ThreadPool).getActiveCount() == 0) {
+                        Thread.currentThread().interrupt();
                         break;
                     }
-                    whileSiz += 1;
-
+                }
+                if (timeout) {
+                    this.burp.recreateThreadPoolAfterTimeout();
+                    this.burp.call.printError("Timeout: " + url + "/*");
                 }
 
 
@@ -145,6 +143,15 @@ public class vulscan {
         }
     }
 
+    private boolean allDone(List<Future<?>> futures) {
+        for (Future<?> future : futures) {
+            if (!future.isDone()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
 
     public static void ir_add(Tags tag, String title, String method, String url, String StatusCode, String notes, String Size, IHttpRequestResponse newHttpRequestResponse) {
 //        if (!tag.Get_URL_list().contains(url)) {
@@ -152,40 +159,4 @@ public class vulscan {
 //        }
     }
 
-    public static HashMap<String, String> AnalysisHeaders(List<String> headers){
-        headers.remove(0);
-        HashMap<String, String> headMap = new HashMap<String, String>();
-        for (String i : headers){
-            int indexLocation = i.indexOf(":");
-            String key = i.substring(0,indexLocation).trim();
-            String value = i.substring(indexLocation + 1).trim();
-            headMap.put(key,value);
-        }
-        return headMap;
-
-    }
-
-    public static String[] AnalysisHost(String host){
-        ArrayList<String> ExceptSubdomain = new ArrayList<String>(Collections.singletonList("www"));
-        Pattern zhengze = Pattern.compile("\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}");
-        Matcher pipei = zhengze.matcher(host);
-        if (!pipei.find()){
-            List<String> hostArray = new ArrayList<>(Arrays.asList(host.split("\\.")));
-            if (ExceptSubdomain.contains(hostArray.get(0))){
-                hostArray.remove(0);
-            }
-            if (hostArray.get(hostArray.size() - 1).equals("cn") && hostArray.get(hostArray.size() - 2).equals("com")){
-                hostArray.remove(hostArray.size() - 1);
-                hostArray.remove(hostArray.size() - 1);
-//                hostArray.remove(hostArray.size() - 2);
-            }else {
-                hostArray.remove(hostArray.size() - 1);
-            }
-            return hostArray.toArray(new String[0]);
-        }
-        return new String[]{};
-    }
-
-
 }
-

@@ -2,11 +2,7 @@ package func;
 
 
 import burp.Bfunc;
-import burp.IExtensionHelpers;
 import burp.IHttpRequestResponse;
-
-
-import com.sun.jmx.snmp.tasks.Task;
 
 import java.net.MalformedURLException;
 import java.net.URL;
@@ -15,50 +11,47 @@ import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 
-public class threads implements Task {
+public class threads implements Runnable {
     private Map<String, Object> zidian;
     private vulscan vul;
     private IHttpRequestResponse newHttpRequestResponse;
     private List<String> heads;
-    private List<String> Bypass_List;
+    private String pathRecord;
 
-    public threads(Map<String, Object> zidian, vulscan vul, IHttpRequestResponse newHttpRequestResponse, List<String> heads, List<String> Bypass_List) {
+    public threads(Map<String, Object> zidian, vulscan vul, IHttpRequestResponse newHttpRequestResponse, List<String> heads, String pathRecord) {
         this.zidian = zidian;
         this.vul = vul;
         this.newHttpRequestResponse = newHttpRequestResponse;
         this.heads = heads;
-        this.Bypass_List = Bypass_List;
-    }
-
-    @Override
-    public void cancel() {
-
+        this.pathRecord = pathRecord;
     }
 
     @Override
     public void run() {
-        go(this.zidian, this.vul, this.newHttpRequestResponse, this.heads, this.Bypass_List);
+        go(this.zidian, this.vul, this.newHttpRequestResponse, this.heads, this.pathRecord);
 
     }
 
-    private static void go(Map<String, Object> zidian, vulscan vul, IHttpRequestResponse newHttpRequestResponse, List<String> heads, List<String> Bypass_List) {
+    private static void go(Map<String, Object> zidian, vulscan vul, IHttpRequestResponse newHttpRequestResponse, List<String> heads, String pathRecord) {
 
-        String name = (String) zidian.get("name");
-        boolean loaded = (boolean) zidian.get("loaded");
-        String urll = Bfunc.ProcTemplateLanguag((String) zidian.get("url"), newHttpRequestResponse, vul, false);
-        String re = Bfunc.ProcTemplateLanguag((String) zidian.get("re"), newHttpRequestResponse, vul, true);
-        String info = (String) zidian.get("info");
+        String name = String.valueOf(zidian.get("name"));
+        boolean loaded = Boolean.parseBoolean(String.valueOf(zidian.get("loaded")));
+        String urll = Bfunc.ProcTemplateLanguag(String.valueOf(zidian.get("url")), newHttpRequestResponse, vul, false);
+        String re = Bfunc.ProcTemplateLanguag(String.valueOf(zidian.get("re")), newHttpRequestResponse, vul, true);
+        String info = String.valueOf(zidian.get("info"));
 //        String state = (String) zidian.get("state");
-        Collection<Integer> states = Bfunc.StatusCodeProc((String) zidian.get("state"));
+        Collection<Integer> states = Bfunc.StatusCodeProc(String.valueOf(zidian.get("state")));
 
         if (loaded) {
             URL url = null;
             try {
-                url = new URL(vul.burp.help.analyzeRequest(newHttpRequestResponse).getUrl().getProtocol(), vul.burp.help.analyzeRequest(newHttpRequestResponse).getUrl().getHost(), vul.burp.help.analyzeRequest(newHttpRequestResponse).getUrl().getPort(), String.valueOf(vul.Path_record) + urll);
+                url = new URL(vul.burp.help.analyzeRequest(newHttpRequestResponse).getUrl().getProtocol(), vul.burp.help.analyzeRequest(newHttpRequestResponse).getUrl().getHost(), vul.burp.help.analyzeRequest(newHttpRequestResponse).getUrl().getPort(), String.valueOf(pathRecord) + urll);
             } catch (MalformedURLException e) {
                 e.printStackTrace();
+                return;
             }
 //            boolean is_InList;
 //            synchronized (vul.burp.history_url) {
@@ -71,11 +64,12 @@ public class threads implements Task {
             byte[] request = vul.burp.help.buildHttpRequest(url);
             // 添加head
             if (vul.burp.Carry_head) {
-                synchronized (heads) {
-                    heads.remove(0);
-                    heads.add(0, vul.burp.help.analyzeRequest(request).getHeaders().get(0));
-                    request = vul.burp.help.buildHttpMessage(heads, new byte[]{});
+                List<String> carryHeaders = new java.util.ArrayList<String>(heads);
+                if (!carryHeaders.isEmpty()) {
+                    carryHeaders.remove(0);
                 }
+                carryHeaders.add(0, vul.burp.help.analyzeRequest(request).getHeaders().get(0));
+                request = vul.burp.help.buildHttpMessage(carryHeaders, new byte[]{});
             }
             if ("POST".equals(zidian.get("method"))) {
                 request = vul.burp.help.toggleRequestMethod(request);
@@ -85,50 +79,28 @@ public class threads implements Task {
             newHttpRequestResponse = vul.burp.call.makeHttpRequest(vul.httpService, request);
 
 
-            // 是否匹配成功
-            boolean IFconform = true;
 //                if (vul.burp.help.analyzeResponse(newHttpRequestResponse.getResponse()).getStatusCode() == Integer.parseInt(state)) {
 
-            Integer stat = 0;
             if (newHttpRequestResponse.getResponse() == null){
                 return;
             }
 
-            if (states.contains(new Integer(vul.burp.help.analyzeResponse(newHttpRequestResponse.getResponse()).getStatusCode()))) {
+            if (states.contains(Integer.valueOf(vul.burp.help.analyzeResponse(newHttpRequestResponse.getResponse()).getStatusCode()))) {
                 byte[] resp = newHttpRequestResponse.getResponse();
-                Pattern re_rule = Pattern.compile(re, Pattern.CASE_INSENSITIVE);
+                Pattern re_rule;
+                try {
+                    re_rule = Pattern.compile(re, Pattern.CASE_INSENSITIVE);
+                } catch (PatternSyntaxException e) {
+                    vul.burp.call.printError("Invalid regex in rule " + name + ": " + re);
+                    return;
+                }
                 Matcher pipe = re_rule.matcher(vul.burp.help.bytesToString(resp));
                 String lang = String.valueOf(vul.burp.help.bytesToString(resp).length());
                 if (pipe.find()) {
                     synchronized(vul){
                         vulscan.ir_add(vul.burp.tags, name, vul.burp.help.analyzeRequest(newHttpRequestResponse).getMethod(), vul.burp.help.analyzeRequest(newHttpRequestResponse).getUrl().toString(), String.valueOf(vul.burp.help.analyzeResponse(newHttpRequestResponse.getResponse()).getStatusCode()) + " ", info, lang, newHttpRequestResponse);
-                        IFconform = false;
                     }
 
-
-                }
-            }
-//           匹配不成功则匹配bypass
-            if (IFconform) {
-                if (vul.burp.Bypass) {
-                    for (String i : Bypass_List) {
-                        byte[] newRequest = threads.edit_Bypass_request(vul.burp.help, request, i,urll);
-                        newHttpRequestResponse = vul.burp.call.makeHttpRequest(vul.httpService, newRequest);
-//                            if (vul.burp.help.analyzeResponse(newHttpRequestResponse.getResponse()).getStatusCode() == Integer.parseInt(state)) {
-                        if (states.contains(vul.burp.help.analyzeResponse(newHttpRequestResponse.getResponse()).getStatusCode())) {
-                            byte[] resp = newHttpRequestResponse.getResponse();
-                            Pattern re_rule = Pattern.compile(re, Pattern.CASE_INSENSITIVE);
-                            Matcher pipe = re_rule.matcher(vul.burp.help.bytesToString(resp));
-                            String lang = String.valueOf(vul.burp.help.bytesToString(resp).length());
-                            if (pipe.find()) {
-                                synchronized(vul) {
-                                    vulscan.ir_add(vul.burp.tags, name, vul.burp.help.analyzeRequest(newHttpRequestResponse).getMethod(), vul.burp.help.analyzeRequest(newHttpRequestResponse).getUrl().toString(), String.valueOf(vul.burp.help.analyzeResponse(newHttpRequestResponse.getResponse()).getStatusCode()) + " ", info, lang, newHttpRequestResponse);
-                                    break;
-                                }
-                            }
-                        }
-
-                    }
 
                 }
             }
@@ -146,35 +118,5 @@ public class threads implements Task {
 
     }
 
-    private static byte[] edit_Bypass_request(IExtensionHelpers help, byte[] request, String str, String payPath) {
-
-        String requests = help.bytesToString(request);
-        String[] rows = requests.split("\r\n");
-        String path = rows[0].split(" ")[1];
-        String prefix = "";
-        if (path.contains("http://")) {
-            prefix = "http://";
-            path = path.replace("http://", "");
-        }
-        if (path.contains("https://")) {
-            path = path.replace("http://", "");
-            prefix = "https://";
-        }
-
-        String newpath = path.replace(payPath,"") + payPath.replace("/", "/" + str + "/");
-//        String newpath = path.replace("/", "/" + str + "/");
-        if (path.endsWith("/")) {
-            newpath = newpath.substring(0, newpath.lastIndexOf(str + "/"));
-//            newpath = newpath.substring(0, newpath.lastIndexOf("/" + str + "/"));
-        }
-        newpath = prefix + newpath;
-        String row1 = rows[0].split(" ")[0] + " " + newpath + " " + rows[0].split(" ")[2];
-        String newRequest = requests.replace(rows[0], row1);
-        return help.stringToBytes(newRequest);
-    }
-
 
 }
-
-
-

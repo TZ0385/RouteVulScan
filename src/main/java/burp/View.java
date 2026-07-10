@@ -5,6 +5,7 @@ import yaml.YamlUtil;
 import javax.swing.*;
 import javax.swing.table.AbstractTableModel;
 import javax.swing.table.TableModel;
+import java.awt.BorderLayout;
 import java.awt.event.ActionEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
@@ -17,7 +18,7 @@ public class View extends AbstractTableModel {
     private JSplitPane splitPane;
     public final List<LogEntry> log = new ArrayList<LogEntry>();
 
-    private JSplitPane top;
+    private JPanel top;
 
     public LogEntry Choice;
 
@@ -31,7 +32,7 @@ public class View extends AbstractTableModel {
     public View() {
 
         // 创建最上面的一层
-        top = new JSplitPane(JSplitPane.VERTICAL_SPLIT);
+        top = new JPanel(new BorderLayout());
 //        // 创建容器，容器可以加入多个页面
 //        JTabbedPane tabs = new JTabbedPane();
 
@@ -76,7 +77,7 @@ public class View extends AbstractTableModel {
 
 
         // 将容器置于顶层
-        top.setTopComponent(scrollPane);
+        top.add(scrollPane, BorderLayout.CENTER);
 
     }
 
@@ -84,7 +85,7 @@ public class View extends AbstractTableModel {
     // 返回ITab
     //
 
-    public JSplitPane Get_View() {
+    public JComponent Get_View() {
         return this.top;
     }
 

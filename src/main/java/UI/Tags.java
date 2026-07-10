@@ -16,7 +16,7 @@ import java.util.List;
 public class Tags extends AbstractTableModel implements ITab, IMessageEditorController {
     public IBurpExtenderCallbacks callbacks;
 
-    private JSplitPane top;
+    private JPanel top;
 
     public List<TablesData> Udatas = new ArrayList<>();
 
@@ -56,11 +56,13 @@ public class Tags extends AbstractTableModel implements ITab, IMessageEditorCont
         SwingUtilities.invokeLater(new Runnable() {
             public void run() {
                 // 创建最上面的一层
-                Tags.this.top = new JSplitPane(JSplitPane.VERTICAL_SPLIT);
+                Tags.this.top = new JPanel(new BorderLayout());
                 // 创建容器，容器可以加入多个页面
                 JTabbedPane tabs = new JTabbedPane();
                 // 创建主拆分窗格
                 splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT);
+                splitPane.setResizeWeight(0.35D);
+                splitPane.setDividerSize(4);
 
 
                 // 日志条目表
@@ -93,8 +95,7 @@ public class Tags extends AbstractTableModel implements ITab, IMessageEditorCont
 
 
                 //创建请求和响应的展示窗
-                Tags.this.HjSplitPane = new JSplitPane();
-                Tags.this.HjSplitPane.setDividerLocation(0.5D);
+                Tags.this.HjSplitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT);
 
                 // 创建请求/响应的子选项卡
                 Tags.this.Ltable = new JTabbedPane();
@@ -109,12 +110,12 @@ public class Tags extends AbstractTableModel implements ITab, IMessageEditorCont
                 // 将子选项卡添加进主选项卡
                 Tags.this.HjSplitPane.setResizeWeight(0.5D);
                 Tags.this.HjSplitPane.setDividerSize(3);
-                Tags.this.HjSplitPane.add(Tags.this.Ltable, "left");
-                Tags.this.HjSplitPane.add(Tags.this.Rtable, "right");
+                Tags.this.HjSplitPane.setLeftComponent(Tags.this.Ltable);
+                Tags.this.HjSplitPane.setRightComponent(Tags.this.Rtable);
 
                 // 将日志条目表和展示窗添加到主拆分窗格
-                Tags.this.splitPane.add(Tags.this.UscrollPane, "left");
-                Tags.this.splitPane.add(Tags.this.HjSplitPane, "right");
+                Tags.this.splitPane.setTopComponent(Tags.this.UscrollPane);
+                Tags.this.splitPane.setBottomComponent(Tags.this.HjSplitPane);
 
                 // 将两个页面插入容器
                 tabs.addTab("VulDisplay", Tags.this.splitPane);
@@ -123,7 +124,7 @@ public class Tags extends AbstractTableModel implements ITab, IMessageEditorCont
                 tabs.addTab("Config",Config_l.$$$getRootComponent$$$());
 
                 // 将容器置于顶层
-                top.setTopComponent(tabs);
+                top.add(tabs, BorderLayout.CENTER);
 
                 // 定制我们的UI组件
                 Tags.this.callbacks.customizeUiComponent(Tags.this.top);
@@ -216,12 +217,13 @@ public class Tags extends AbstractTableModel implements ITab, IMessageEditorCont
     }
 
     public int add(String VulName, String Method, String url, String status, String Info, String Size, IHttpRequestResponse requestResponse) {
+        final int id;
         synchronized (this.Udatas) {
 //            this.callbacks.printOutput(url + "    " + Info);
             Date d = new Date();
             SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
             String startTime = sdf.format(d);
-            int id = this.Udatas.size();
+            id = this.Udatas.size();
             this.Udatas.add(
                     new TablesData(
                             id,
@@ -234,9 +236,19 @@ public class Tags extends AbstractTableModel implements ITab, IMessageEditorCont
                             requestResponse,
                             startTime,
                             ""));
-            fireTableRowsInserted(id, id);
-            return id;
         }
+        Runnable fire = new Runnable() {
+            @Override
+            public void run() {
+                fireTableRowsInserted(id, id);
+            }
+        };
+        if (SwingUtilities.isEventDispatchThread()) {
+            fire.run();
+        } else {
+            SwingUtilities.invokeLater(fire);
+        }
+        return id;
     }
 
 
@@ -453,8 +465,12 @@ class Remove_action implements ActionListener {
 
     @Override
     public void actionPerformed(ActionEvent e) {
-        int[] RemId = tag.Utable.getSelectedRows();
-        for (int i : reversal(RemId)) {
+        int[] selectedRows = tag.Utable.getSelectedRows();
+        int[] modelRows = new int[selectedRows.length];
+        for (int i = 0; i < selectedRows.length; i++) {
+            modelRows[i] = tag.Utable.convertRowIndexToModel(selectedRows[i]);
+        }
+        for (int i : reversal(modelRows)) {
             tag.Udatas.remove(i);
             tag.fireTableRowsDeleted(i, i);
             tag.HRequestTextEditor.setMessage(new byte[]{},true);
@@ -473,4 +489,3 @@ class Remove_action implements ActionListener {
 
     }
 }
-

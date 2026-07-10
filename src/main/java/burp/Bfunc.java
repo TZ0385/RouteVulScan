@@ -17,20 +17,18 @@ public class Bfunc {
         for (Map<String, Object> zidian : rule_list) {
             String type = (String) zidian.get("type");
             String id = String.valueOf(zidian.get("id"));
-            String name = (String) zidian.get("name");
-            String url = (String) zidian.get("url");
-            String re = (String) zidian.get("re");
-            String info = (String) zidian.get("info");
-            String state = (String) zidian.get("state");
-            String method = (String) zidian.get("method");
+            String name = String.valueOf(zidian.get("name"));
+            String url = String.valueOf(zidian.get("url"));
+            String re = String.valueOf(zidian.get("re"));
+            String info = String.valueOf(zidian.get("info"));
+            String state = String.valueOf(zidian.get("state"));
+            String method = String.valueOf(zidian.get("method"));
             boolean loaded = Boolean.parseBoolean(String.valueOf(zidian.get("loaded")));
 
-            if (type == null && !loaded) {
+            if (type == null || type.trim().length() == 0 || "null".equals(type)) {
                 zidian.put("type", "default");
-                zidian.put("loaded", true);
                 YamlUtil.updateYaml(zidian, BurpExtender.Yaml_Path);
                 type = "default";
-                loaded = true;
             }
 
             if (views.containsKey(type)) {
@@ -54,7 +52,6 @@ public class Bfunc {
             List<View.LogEntry> log = view.log;
             synchronized (log) {
                 log.clear();
-                int row = log.size();
                 Map<String, Object> Dict_Yaml = YamlUtil.readYaml(BurpExtender.Yaml_Path);
                 List<Map<String, Object>> rule_list = (List<Map<String, Object>>) Dict_Yaml.get("Load_List");
                 for (Map<String, Object> zidian : rule_list) {
@@ -62,16 +59,16 @@ public class Bfunc {
                     if (type2.equals(type)) {
                         String id = String.valueOf(zidian.get("id"));
                         boolean loaded = Boolean.parseBoolean(String.valueOf(zidian.get("loaded")));
-                        String name = (String) zidian.get("name");
-                        String url = (String) zidian.get("url");
-                        String re = (String) zidian.get("re");
-                        String info = (String) zidian.get("info");
-                        String state = (String) zidian.get("state");
-                        String method = (String) zidian.get("method");
+                        String name = String.valueOf(zidian.get("name"));
+                        String url = String.valueOf(zidian.get("url"));
+                        String re = String.valueOf(zidian.get("re"));
+                        String info = String.valueOf(zidian.get("info"));
+                        String state = String.valueOf(zidian.get("state"));
+                        String method = String.valueOf(zidian.get("method"));
                         log.add(new View.LogEntry(id, type, loaded, name, method, url, re, info, state));
-                        view.fireTableRowsInserted(row, row);
                     }
                 }
+                view.fireTableDataChanged();
             }
 //            burp.views = Get_Views();
         }
@@ -90,46 +87,90 @@ public class Bfunc {
 
     public static Collection<Integer> StatusCodeProc(String state){
         Collection<Integer> stateList = new ArrayList<Integer>();
+        if (state == null || state.trim().length() == 0) {
+            stateList.add(200);
+            return stateList;
+        }
+        state = state.trim();
         if (state.length() != 3 && (state.contains(",") || state.contains("-"))){
             if (state.contains(",")){
                 String[] states = state.split(",");
                 for (String OneState:states){
+                    OneState = OneState.trim();
                     if (OneState.contains("-")){
                         String[] parts = OneState.split("-");
-                        int start = Integer.parseInt(parts[0]);
-                        int end = Integer.parseInt(parts[1]);
-                        for (int i = start; i <= end; i++) {
-                            stateList.add(i);
+                        if (parts.length == 2) {
+                            try {
+                                int start = Integer.parseInt(parts[0].trim());
+                                int end = Integer.parseInt(parts[1].trim());
+                                addStatusRange(stateList, start, end);
+                            } catch (NumberFormatException ignored) {
+                            }
                         }
                     }else if (OneState.length() == 3){
-                        stateList.add(Integer.valueOf(OneState));
+                        try {
+                            addStatus(stateList, Integer.parseInt(OneState));
+                        } catch (NumberFormatException ignored) {
+                        }
                     }
                 }
             }else if (state.contains("-")){
                 String[] parts = state.split("-");
-                int start = Integer.parseInt(parts[0]);
-                int end = Integer.parseInt(parts[1]);
-                for (int i = start; i <= end; i++) {
-                    stateList.add(i);
+                if (parts.length == 2) {
+                    try {
+                        int start = Integer.parseInt(parts[0].trim());
+                        int end = Integer.parseInt(parts[1].trim());
+                        addStatusRange(stateList, start, end);
+                    } catch (NumberFormatException ignored) {
+                    }
                 }
             }
         }else {
-            stateList.add(Integer.valueOf(state));
+            try {
+                addStatus(stateList, Integer.parseInt(state));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        if (stateList.isEmpty()) {
+            stateList.add(200);
         }
         return stateList;
 
+    }
+
+    private static void addStatusRange(Collection<Integer> stateList, int start, int end) {
+        int from = Math.max(100, start);
+        int to = Math.min(599, end);
+        if (from > to) {
+            return;
+        }
+        for (int i = from; i <= to; i++) {
+            stateList.add(i);
+        }
+    }
+
+    private static void addStatus(Collection<Integer> stateList, int status) {
+        if (status >= 100 && status <= 599) {
+            stateList.add(status);
+        }
     }
 
 
 
     public static String ProcTemplateLanguag(String url, IHttpRequestResponse HttpRequestResponse, vulscan vul,Boolean escape){
 
+        if (url == null) {
+            return "";
+        }
 
 
         if (url.contains("{{") && url.contains("}}")){
             String marking = url.substring(url.indexOf("{{"), url.lastIndexOf("}}") + 2);
             String markingContent = marking.replace("{{", "").replace("}}", "").toLowerCase();
             String[] parts = markingContent.split("\\.");
+            if (parts.length < 2) {
+                return url;
+            }
             IHttpService httpservice = HttpRequestResponse.getHttpService();
             switch (parts[0]){
                 case "request":
@@ -137,6 +178,9 @@ public class Bfunc {
                     switch (parts[1]){
                         case "head":
                             Map<String, String> heads = Bfunc.ProceHead(request.getHeaders());
+                            if (parts.length < 3) {
+                                return replaceOn(url,marking,"",escape);
+                            }
                             if (parts[2].equals("host") && parts.length >3){
                                 switch (parts[3]){
                                     case "main":
@@ -149,7 +193,11 @@ public class Bfunc {
                         case "method":
                             return replaceOn(url,marking,request.getMethod(),escape);
                         case "path":
-                            return replaceOn(url,marking,request.getUrl().getPath().substring(1),escape);
+                            String path = request.getUrl().getPath();
+                            if (path == null) {
+                                path = "";
+                            }
+                            return replaceOn(url,marking,path.startsWith("/") ? path.substring(1) : path,escape);
                         case "url":
                             return replaceOn(url,marking,request.getUrl().toString(),escape);
                         case "protocol":
@@ -165,6 +213,9 @@ public class Bfunc {
                         switch (parts[1]){
                             case "head":
                                 Map<String, String> heads = Bfunc.ProceHead(response.getHeaders());
+                                if (parts.length < 3) {
+                                    return replaceOn(url,marking,"",escape);
+                                }
                                 return replaceOn(url,marking,heads.get(parts[2]),escape);
                             case "status":
                                 return replaceOn(url,marking,String.valueOf(response.getStatusCode()),escape);
@@ -194,13 +245,19 @@ public class Bfunc {
     }
 
     public static String AnalyHost(String host, String mode){
+        if (host == null || host.trim().length() == 0) {
+            return "";
+        }
         String domain = host.split(":")[0];
         if (host.matches("^\\d+\\.\\d+\\.\\d+\\.\\d+$")) {
             return host;
         }
         String[] parts = domain.split("\\.");
+        if (parts.length < 2) {
+            return domain;
+        }
 
-        if (parts[parts.length-1].equals("cn") && parts[parts.length-2].equals("com")){
+        if (parts.length >= 3 && parts[parts.length-1].equals("cn") && parts[parts.length-2].equals("com")){
             if (mode.equals("main")){
                 domain = parts[parts.length-3] + "." + parts[parts.length-2] + "." + parts[parts.length-1];
                 return domain;
@@ -223,11 +280,14 @@ public class Bfunc {
 
 
     public static Map<String,String> ProceHead(List<String> heads){
-        heads.remove(heads.get(0));
         Map<String,String> headmap = new HashMap<String,String>();
-        for (String head:heads){
+        for (int i = 1; i < heads.size(); i++){
+            String head = heads.get(i);
+            if (!head.contains(":")) {
+                continue;
+            }
             String key = head.substring(0, head.indexOf(":")).toLowerCase();
-            String value = head.substring(head.indexOf(":") + 2);
+            String value = head.substring(head.indexOf(":") + 1).trim();
             headmap.put(key,value);
         }
         return headmap;

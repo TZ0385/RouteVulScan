@@ -3,7 +3,6 @@ package burp;
 import UI.Tags;
 import func.vulscan;
 import utils.BurpAnalyzedRequest;
-import utils.DomainNameRepeat;
 import utils.UrlRepeat;
 import yaml.YamlUtil;
 
@@ -16,52 +15,52 @@ import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.*;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 
 public class BurpExtender implements IBurpExtender, IScannerCheck, IContextMenuFactory {
 
-    public static String Yaml_Path = System.getProperty("user.dir") + "/" + "Config_yaml.yaml";
+    public static final String CONFIG_DIR = System.getProperty("user.home") + File.separator + ".config" + File.separator + "RouteVulScan";
+    public static String Yaml_Path = CONFIG_DIR + File.separator + "Config_yaml.yaml";
     public IBurpExtenderCallbacks call;
-    private DomainNameRepeat DomainName;
     public IExtensionHelpers help;
     public Tags tags;
     private UrlRepeat urlC;
-    public Collection<String> history_url = new LinkedList<String>();
+    public Set<String> history_url = Collections.synchronizedSet(new LinkedHashSet<String>());
     public static String EXPAND_NAME = "Route Vulnerable Scan";
     public Config Config_l;
-    public ExecutorService ThreadPool;
-    public boolean Carry_head = false;
+    public ThreadPoolExecutor ThreadPool;
+    private ThreadPoolExecutor scanCoordinatorPool;
+    private final Set<String> activeCoordinatorKeys = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+    private volatile int configuredThreadCount = 10;
+    public boolean Carry_head = true;
     public boolean on_off = false;
-    public boolean Bypass = false;
-    public boolean DomainScan = false;
-    public static String Download_Yaml_protocol = "https";
+    private static final int SCAN_COORDINATOR_QUEUE_LIMIT = 2000;
 
     public static String VERSION = "1.5.4";
-    public static String Download_Yaml_host = "raw.githubusercontent.com";
-    public static int Download_Yaml_port = 443;
-    public static String Download_Yaml_file = "/F6JO/RouteVulScan/main/Config_yaml.yaml";
     public Map<String, View> views;
-    public JTextField Host_txtfield;
+    public JTextArea Host_textarea;
 
 
 
 
     public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
-        if (!new File(Yaml_Path).exists()) {
-            Map<String, Object> x = new HashMap<String, Object>();
-            Collection<Object> list1 = new ArrayList<Object>();
-            x.put("Load_List", list1);
-            YamlUtil.writeYaml(x, Yaml_Path);
-        }
+        YamlUtil.ensureYamlExists(Yaml_Path);
         this.call = callbacks;
         this.help = call.getHelpers();
-        this.DomainName = new DomainNameRepeat();
         this.urlC = new UrlRepeat();
         this.Config_l = new Config(this);
+        resizeThreadPool(10);
+        getScanCoordinatorPool();
         this.tags = new Tags(callbacks, Config_l);
 //        this.views = Bfunc.Get_Views();
         call.printOutput("@Info: Loading RouteVulScan success");
@@ -79,11 +78,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, IContextMenuF
     public List<IScanIssue> doPassiveScan(IHttpRequestResponse baseRequestResponse) {
         ArrayList<IScanIssue> IssueList = new ArrayList();
         if (on_off) {
-            String re = Host_txtfield.getText().replace(".", "\\.").replace("*", ".*?");
-            Pattern pattern = Pattern.compile(re);
-            Matcher matcher = pattern.matcher(baseRequestResponse.getHttpService().getHost());
-            if (matcher.find()) {
-                this.ThreadPool = Executors.newFixedThreadPool((Integer) Config_l.spinner1.getValue());
+            if (isHostAllowed(baseRequestResponse.getHttpService().getHost())) {
                 IHttpService Http_Service = baseRequestResponse.getHttpService();
                 String Root_Url = Http_Service.getProtocol() + "://" + Http_Service.getHost() + ":" + String.valueOf(Http_Service.getPort());
                 try {
@@ -91,19 +86,14 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, IContextMenuF
                     BurpAnalyzedRequest Root_Request = new BurpAnalyzedRequest(this.call, baseRequestResponse);
                     String Root_Method = this.help.analyzeRequest(baseRequestResponse.getRequest()).getMethod();
                     String New_Url = this.urlC.RemoveUrlParameterValue(url.toString());
-                    if (this.urlC.check(Root_Method, New_Url)) {
+                    if (!this.urlC.addIfAbsent(Root_Method, New_Url)) {
                         return null;
                     }
-                    new vulscan(this, Root_Request,null);
-                    this.urlC.addMethodAndUrl(Root_Method, New_Url);
-                    try {
-                        this.DomainName.add(Root_Url);
-                        return IssueList;
-                    } catch (Throwable th) {
-                        return IssueList;
-                    }
+                    submitRouteScan(Root_Request, null);
+                    return IssueList;
                 } catch (MalformedURLException e3) {
-                    throw new RuntimeException(e3);
+                    call.printError("RouteVulScan passive scan skipped malformed URL: " + e3.toString());
+                    return IssueList;
                 }
             } else {
                 return IssueList;
@@ -113,6 +103,168 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, IContextMenuF
         } else {
             return IssueList;
         }
+    }
+
+    public synchronized ThreadPoolExecutor getThreadPool() {
+        if (ThreadPool == null || ThreadPool.isShutdown() || ThreadPool.isTerminated()) {
+            ThreadPool = createThreadPool(getConfiguredThreadCount());
+        }
+        return ThreadPool;
+    }
+
+    public synchronized Future<?> submitScanTask(Runnable task) {
+        return getThreadPool().submit(task);
+    }
+
+    public boolean submitRouteScan(final BurpAnalyzedRequest rootRequest, final byte[] request) {
+        if (rootRequest == null || rootRequest.requestResponse() == null) {
+            return false;
+        }
+        String scanKey = "SCAN " + buildScanKey(rootRequest.requestResponse(), request);
+        return submitCoordinatorTask(scanKey, new Runnable() {
+            @Override
+            public void run() {
+                new vulscan(BurpExtender.this, rootRequest, request);
+            }
+        });
+    }
+
+    public boolean submitCoordinatorTask(final String key, final Runnable task) {
+        if (task == null) {
+            return false;
+        }
+        final String coordinatorKey = key == null || key.trim().length() == 0 ? UUID.randomUUID().toString() : key;
+        if (!activeCoordinatorKeys.add(coordinatorKey)) {
+            call.printError("Skip queued scan: " + coordinatorKey);
+            return false;
+        }
+        try {
+            getScanCoordinatorPool().execute(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        task.run();
+                    } catch (Throwable throwable) {
+                        call.printError("RouteVulScan scan task failed: " + throwable.toString());
+                    } finally {
+                        activeCoordinatorKeys.remove(coordinatorKey);
+                    }
+                }
+            });
+            return true;
+        } catch (RejectedExecutionException e) {
+            activeCoordinatorKeys.remove(coordinatorKey);
+            call.printError("RouteVulScan scan queue is full, skipped: " + coordinatorKey);
+            return false;
+        }
+    }
+
+    public String buildScanKey(IHttpRequestResponse requestResponse, byte[] request) {
+        try {
+            byte[] requestBytes = request == null ? requestResponse.getRequest() : request;
+            IRequestInfo requestInfo = help.analyzeRequest(requestResponse.getHttpService(), requestBytes);
+            return requestInfo.getMethod() + " " + urlC.RemoveUrlParameterValue(requestInfo.getUrl().toString());
+        } catch (Exception e) {
+            return UUID.randomUUID().toString();
+        }
+    }
+
+    public synchronized void resizeThreadPool(int size) {
+        int normalizedSize = Math.max(1, Math.min(500, size));
+        configuredThreadCount = normalizedSize;
+        if (ThreadPool == null || ThreadPool.isShutdown() || ThreadPool.isTerminated()) {
+            ThreadPool = createThreadPool(normalizedSize);
+            return;
+        }
+        int currentMax = ThreadPool.getMaximumPoolSize();
+        if (normalizedSize > currentMax) {
+            ThreadPool.setMaximumPoolSize(normalizedSize);
+            ThreadPool.setCorePoolSize(normalizedSize);
+        } else {
+            ThreadPool.setCorePoolSize(normalizedSize);
+            ThreadPool.setMaximumPoolSize(normalizedSize);
+        }
+    }
+
+    public int getConfiguredThreadCount() {
+        if (Config_l == null) {
+            return 10;
+        }
+        return Config_l.getThreadCount();
+    }
+
+    public synchronized void recreateThreadPoolAfterTimeout() {
+        ThreadPoolExecutor oldPool = ThreadPool;
+        ThreadPool = createThreadPool(configuredThreadCount);
+        if (oldPool != null) {
+            oldPool.shutdownNow();
+        }
+    }
+
+    private ThreadPoolExecutor createThreadPool(int size) {
+        return new ThreadPoolExecutor(size, size, 60L, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>(), new ThreadFactory() {
+            private final AtomicInteger counter = new AtomicInteger(1);
+
+            @Override
+            public Thread newThread(Runnable r) {
+                Thread thread = new Thread(r, "RouteVulScan-worker-" + counter.getAndIncrement());
+                thread.setDaemon(true);
+                return thread;
+            }
+        });
+    }
+
+    private synchronized ThreadPoolExecutor getScanCoordinatorPool() {
+        if (scanCoordinatorPool == null || scanCoordinatorPool.isShutdown() || scanCoordinatorPool.isTerminated()) {
+            scanCoordinatorPool = createScanCoordinatorPool();
+        }
+        return scanCoordinatorPool;
+    }
+
+    private ThreadPoolExecutor createScanCoordinatorPool() {
+        return new ThreadPoolExecutor(1, 1, 60L, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>(SCAN_COORDINATOR_QUEUE_LIMIT), new ThreadFactory() {
+            private final AtomicInteger counter = new AtomicInteger(1);
+
+            @Override
+            public Thread newThread(Runnable r) {
+                Thread thread = new Thread(r, "RouteVulScan-scan-" + counter.getAndIncrement());
+                thread.setDaemon(true);
+                return thread;
+            }
+        });
+    }
+
+    private boolean isHostAllowed(String host) {
+        String text = Host_textarea == null ? "*" : Host_textarea.getText();
+        String[] rows = text.split("\\R");
+        boolean hasRule = false;
+        for (String row : rows) {
+            String rule = row.trim();
+            if (rule.length() == 0 || rule.startsWith("#")) {
+                continue;
+            }
+            hasRule = true;
+            if ("*".equals(rule) || wildcardMatch(rule, host)) {
+                return true;
+            }
+        }
+        return !hasRule;
+    }
+
+    private boolean wildcardMatch(String rule, String host) {
+        StringBuilder regex = new StringBuilder("^");
+        for (int i = 0; i < rule.length(); i++) {
+            char c = rule.charAt(i);
+            if (c == '*') {
+                regex.append(".*");
+            } else {
+                regex.append(Pattern.quote(String.valueOf(c)));
+            }
+        }
+        regex.append("$");
+        Pattern pattern = Pattern.compile(regex.toString(), Pattern.CASE_INSENSITIVE);
+        Matcher matcher = pattern.matcher(host);
+        return matcher.matches();
     }
 
     public List<IScanIssue> doActiveScan(IHttpRequestResponse baseRequestResponse, IScannerInsertionPoint insertionPoint) {
@@ -125,6 +277,10 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, IContextMenuF
 
     @Override
     public List<JMenuItem> createMenuItems(IContextMenuInvocation invocation) {
+        IHttpRequestResponse[] selectedMessages = invocation.getSelectedMessages();
+        if (selectedMessages == null || selectedMessages.length == 0) {
+            return null;
+        }
         List<JMenuItem> menu = new ArrayList<JMenuItem>();
         JMenuItem one_menu = new JMenuItem("Send To RouteVulScan");
         JMenuItem two_menu = new JMenuItem("Send To RouteVulScan and Head");
@@ -166,12 +322,14 @@ class Right_click_monitor implements ActionListener {
 
     @Override
     public void actionPerformed(ActionEvent e) {
-        burp.ThreadPool = Executors.newFixedThreadPool((Integer) burp.Config_l.spinner1.getValue());
         IHttpRequestResponse[] RequestResponses = invocation.getSelectedMessages();
+        if (RequestResponses == null || RequestResponses.length == 0) {
+            return;
+        }
         if (head) {
             JTextArea jTextArea = new JTextArea(1, 1);
             jTextArea.setLineWrap(false);
-            List<String> headers = this.getHeaders(RequestResponses[0]);
+            List<String> headers = new ArrayList<String>(this.getHeaders(RequestResponses[0]));
             headers.remove(0);
             String headerText = "";
             for (String head : headers){
@@ -179,32 +337,20 @@ class Right_click_monitor implements ActionListener {
             }
             jTextArea.setText(headerText);
 
-            JSplitPane jSplitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT);
-            jSplitPane.setResizeWeight(0.95);
-            jSplitPane.add(new JScrollPane(jTextArea));
-
-
-            JSplitPane jSplitPane2 = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT);
-            jSplitPane2.setResizeWeight(0.5);
+            JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
             JButton ok = new JButton("OK");
             JButton cancel = new JButton("Cancel");
+            buttonPanel.add(ok);
+            buttonPanel.add(cancel);
 
-            jSplitPane2.add(ok);
-            jSplitPane2.add(cancel);
-
-            jSplitPane.add(jSplitPane2);
-
-//            SwingUtilities.invokeLater(new Runnable() {
-//                @Override
-//                public void run() {
-//
-//                }
-//            });
-            JFrame frame = new JFrame("Custom Request Header");
-            frame.add(jSplitPane);
-            frame.setSize(600, 400);
-            frame.setLocationRelativeTo(null); // 让窗口在屏幕中央显示
-            frame.setVisible(true);
+            Window owner = burp.tags == null ? null : SwingUtilities.getWindowAncestor(burp.tags.getUiComponent());
+            JDialog frame = new JDialog(owner, "Custom Request Header", Dialog.ModalityType.APPLICATION_MODAL);
+            frame.getContentPane().setLayout(new BorderLayout(8, 8));
+            frame.getContentPane().add(new JScrollPane(jTextArea), BorderLayout.CENTER);
+            frame.getContentPane().add(buttonPanel, BorderLayout.SOUTH);
+            frame.setMinimumSize(new Dimension(600, 400));
+            frame.setSize(700, 500);
+            frame.setLocationRelativeTo(owner);
 
             cancel.addActionListener(new ActionListener() {
                 @Override
@@ -221,52 +367,78 @@ class Right_click_monitor implements ActionListener {
                         return;
                     }
                     frame.dispose();
-                    for (IHttpRequestResponse i : RequestResponses) {
-                        try {
-                            IHttpService Http_Service = i.getHttpService();
-                            IRequestInfo RequestInfo = burp.help.analyzeRequest(Http_Service, i.getRequest());
-                            String host_url = RequestInfo.getUrl().getProtocol() + "://" + RequestInfo.getUrl().getHost();
-                            IHttpRequestResponse[] aaaa = burp.call.getSiteMap(host_url);
-                            for (IHttpRequestResponse oo : aaaa) {
-//                                String Root_Url = Http_Service.getProtocol() + "://" + Http_Service.getHost() + ":" + String.valueOf(Http_Service.getPort());
-//                                URL url = new URL(Root_Url + burp.help.analyzeRequest(xxx).getUrl().getPath());
-                                byte[] xxx = replaceHeader(oo, headersText);
-                                BurpAnalyzedRequest Root_Request = new BurpAnalyzedRequest(burp.call, oo);
-                                start_send send = new start_send(burp, Root_Request,xxx);
-                                send.start();
-                            }
-
-                        } catch (Exception exception) {
-                            exception.printStackTrace();
-                        }
-
-                    }
+                    submitSelectedSiteMapScans(RequestResponses, headersText);
                 }
             });
+            frame.setVisible(true);
 
         }else {
-            for (IHttpRequestResponse i : RequestResponses) {
-                try {
-                    IHttpService Http_Service = i.getHttpService();
-                    IRequestInfo RequestInfo = burp.help.analyzeRequest(Http_Service, i.getRequest());
-                    String host_url = RequestInfo.getUrl().getProtocol() + "://" + RequestInfo.getUrl().getHost();
-                    IHttpRequestResponse[] aaaa = burp.call.getSiteMap(host_url);
-                    for (IHttpRequestResponse xxx : aaaa) {
-//                        String Root_Url = Http_Service.getProtocol() + "://" + Http_Service.getHost() + ":" + String.valueOf(Http_Service.getPort());
-//                        URL url = new URL(Root_Url + burp.help.analyzeRequest(xxx).getUrl().getPath());
-                        BurpAnalyzedRequest Root_Request = new BurpAnalyzedRequest(burp.call, xxx);
-                        start_send send = new start_send(burp, Root_Request,null);
-                        send.start();
-                    }
-
-                } catch (Exception exception) {
-                    exception.printStackTrace();
-                }
-
-            }
+            submitSelectedSiteMapScans(RequestResponses, null);
         }
 
 
+    }
+
+    private void submitSelectedSiteMapScans(IHttpRequestResponse[] requestResponses, final List<String> headersText) {
+        Set<String> hostUrls = new LinkedHashSet<String>();
+        for (IHttpRequestResponse requestResponse : requestResponses) {
+            try {
+                hostUrls.add(getSiteMapHostUrl(requestResponse));
+            } catch (Exception exception) {
+                burp.call.printError("RouteVulScan cannot read selected request: " + exception.toString());
+            }
+        }
+
+        for (final String hostUrl : hostUrls) {
+            final List<String> headerCopy = headersText == null ? null : new ArrayList<String>(headersText);
+            String batchKey = "SITEMAP " + hostUrl + (headerCopy == null ? "" : " HEAD");
+            burp.submitCoordinatorTask(batchKey, new Runnable() {
+                @Override
+                public void run() {
+                    scanSiteMapHost(hostUrl, headerCopy);
+                }
+            });
+        }
+    }
+
+    private String getSiteMapHostUrl(IHttpRequestResponse requestResponse) {
+        IRequestInfo requestInfo = burp.help.analyzeRequest(requestResponse.getHttpService(), requestResponse.getRequest());
+        URL url = requestInfo.getUrl();
+        String protocol = url.getProtocol();
+        int port = url.getPort();
+        if (port < 0) {
+            port = requestResponse.getHttpService().getPort();
+        }
+        boolean defaultPort = ("http".equalsIgnoreCase(protocol) && port == 80) || ("https".equalsIgnoreCase(protocol) && port == 443);
+        return protocol + "://" + url.getHost() + (defaultPort ? "" : ":" + port);
+    }
+
+    private void scanSiteMapHost(String hostUrl, List<String> headersText) {
+        IHttpRequestResponse[] siteMapItems = burp.call.getSiteMap(hostUrl);
+        if (siteMapItems == null || siteMapItems.length == 0) {
+            burp.call.printError("RouteVulScan sitemap is empty: " + hostUrl);
+            return;
+        }
+
+        Set<String> scanKeys = new LinkedHashSet<String>();
+        int scanned = 0;
+        int skipped = 0;
+        for (IHttpRequestResponse siteMapItem : siteMapItems) {
+            try {
+                byte[] request = headersText == null ? null : replaceHeader(siteMapItem, headersText);
+                String scanKey = burp.buildScanKey(siteMapItem, request);
+                if (!scanKeys.add(scanKey)) {
+                    skipped++;
+                    continue;
+                }
+                BurpAnalyzedRequest rootRequest = new BurpAnalyzedRequest(burp.call, siteMapItem);
+                new vulscan(burp, rootRequest, request);
+                scanned++;
+            } catch (Exception exception) {
+                burp.call.printError("RouteVulScan sitemap item failed: " + exception.toString());
+            }
+        }
+        burp.call.printOutput("RouteVulScan sitemap scan finished: " + hostUrl + ", scanned=" + scanned + ", skipped=" + skipped);
     }
 
     public byte[] replaceHeader(IHttpRequestResponse i, List<String> header) {
@@ -300,23 +472,3 @@ class Right_click_monitor implements ActionListener {
     }
 
 }
-
-
-
-class start_send extends Thread {
-    private BurpExtender burp;
-    private BurpAnalyzedRequest Root_Request;
-    private byte[] request;
-
-    public start_send(BurpExtender burp, BurpAnalyzedRequest Root_Request,byte[] request) {
-        this.burp = burp;
-        this.Root_Request = Root_Request;
-        this.request = request;
-    }
-
-    public void run() {
-        new vulscan(this.burp, this.Root_Request,this.request);
-    }
-
-}
-
