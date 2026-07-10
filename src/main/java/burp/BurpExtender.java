@@ -46,7 +46,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, IContextMenuF
     public boolean on_off = false;
     private static final int SCAN_COORDINATOR_QUEUE_LIMIT = 2000;
 
-    public static String VERSION = "1.5.4";
+    public static String VERSION = "2.0";
     public Map<String, View> views;
     public JTextArea Host_textarea;
 
