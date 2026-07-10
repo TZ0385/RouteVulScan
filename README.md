@@ -105,7 +105,7 @@ RouteVulScan是使用java语言基于burpsuite api开发的可以递归检测脆
 
 ## 开心值
 
-[![Stargazers over time](https://starchart.cc/F6JO/RouteVulScan.svg)](https://starchart.cc/F6JO/RouteVulScan)
+[![Stargazers over time](https://starchart.cc/F6JO/RouteVulScan.svg?variant=adaptive)](https://starchart.cc/F6JO/RouteVulScan)
 
 ## 最后
 
